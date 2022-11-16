@@ -34,13 +34,6 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define BME_I2C_ADDR (0b11101100)
-#define BME_REG_TEMPDATA (0xFA)
-#define BME_REG_CHIP_ID (0xD0)
-#define BME_CHIP_ID (0x60)
-#define BME_REG_STATUS (0xF3)
-
-#define I2C_DELAY HAL_MAX_DELAY
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -71,100 +64,61 @@ static void MX_I2C1_Init(void);
 
 void debug_print(char* msg);
 
-uint32_t bme_read24(uint8_t reg) {
-	uint8_t buffer[3];
-	buffer[0] = reg;
-
-	HAL_StatusTypeDef ret = HAL_I2C_Master_Transmit(&hi2c1, BME_I2C_ADDR, buffer, 1, I2C_DELAY);
-	if (ret != HAL_OK) {
-	  char* msg[64];
-	  sprintf(msg, "Not Ok, got %X\r\n", ret);
-	  debug_print(msg);
-	  return 0;
-	} else {
-		// Read 3 bytes from the register
-		ret = HAL_I2C_Master_Receive(&hi2c1, BME_I2C_ADDR, buffer, 3, I2C_DELAY);
-		if (ret != HAL_OK) {
-			return 0;
-		} else {
-			return (u_int32_t)(buffer[0]) << 16 | (u_int32_t)(buffer[1]) << 8 | (u_int32_t)(buffer[2]);
-		}
-	}
-}
-
-uint8_t bme_read8(uint8_t reg) {
-  uint8_t buffer[1];
-  buffer[0] = reg;
-
-  HAL_StatusTypeDef ret = HAL_I2C_Master_Transmit(&hi2c1, BME_I2C_ADDR, buffer, 1, I2C_DELAY);
-  if (ret != HAL_OK) {
-    char* msg[64];
-    sprintf(msg, "Not Ok 1, got %X\r\n", ret);
-    debug_print(msg);
-    return 0;
-  } else {
-    // Read 1 byte from the register
-    ret = HAL_I2C_Master_Receive(&hi2c1, BME_I2C_ADDR, buffer, 1, I2C_DELAY);
-    if (ret != HAL_OK) {
-      char* msg[64];
-      sprintf(msg, "Not Ok 2, got %X\r\n", ret);
-      debug_print(msg);
-      return 0;
-    } else {
-      return buffer[0];
-    }
-  }
-}
-
-float bme_read_temperature() {
-	int32_t adc_T = bme_read24(BME_REG_TEMPDATA);
-	if (adc_T == 0x800000) {
-		return 0.0 / 0.0;
-	}
-
-	char temp_str[512];
-	sprintf(temp_str, "0x%x", adc_T);
-	debug_print(temp_str);
-
-	// TODO: Some calibration shit
-
-	return (float)adc_T / 100;
-}
-
 void debug_print(char* msg) {
   HAL_UART_Transmit(&huart2, msg, strlen(msg), HAL_MAX_DELAY);
 }
 
+
+void bme_read(struct bme280_dev* dev) {
+  int8_t result;
+  uint8_t settings_sel;
+  struct bme280_data comp_data;
+
+  dev->settings.osr_h = BME280_OVERSAMPLING_1X;
+  dev->settings.osr_p = BME280_OVERSAMPLING_16X;
+  dev->settings.osr_t = BME280_OVERSAMPLING_2X;
+  dev->settings.filter = BME280_FILTER_COEFF_16;
+  dev->settings.standby_time = BME280_STANDBY_TIME_62_5_MS;
+
+  settings_sel = BME280_OSR_PRESS_SEL;
+  settings_sel |= BME280_OSR_TEMP_SEL;
+  settings_sel |= BME280_OSR_HUM_SEL;
+  settings_sel |= BME280_STANDBY_SEL;
+  settings_sel |= BME280_FILTER_SEL;
+  result = bme280_set_sensor_settings(settings_sel, dev);
+  result = bme280_set_sensor_mode(BME280_NORMAL_MODE, dev);
+
+  debug_print("t, p, d\r\n");
+
+  dev->delay_ms(70, dev->intf_ptr);
+  result = bme280_get_sensor_data(BME280_ALL, &comp_data, dev);
+
+  char msg[512];
+#ifdef BME280_FLOAT_ENABLE
+  sprintf("%0.2f, %0.2f, %0.2f\r\n", comp_data->temperature, comp_data->pressure, comp_data->humidity);
+#else
+  sprintf("%ld, %ld, %ld\r\n", comp_data->temperature, comp_data->pressure, comp_data->humidity);
+#endif
+  debug_print(msg);
+}
+
 // This function will initialize the BME280 and set it up for reading
 // temperature, pressure, and humidity.
-void bme_init() {
-  uint8_t retry_count = 10;
+//
+// Returns BME280_OK if all good.
+int8_t bme_init(struct bme280_dev* dev) {
+  int8_t rslt = BME280_OK;
+  uint8_t dev_addr = BME280_I2C_ADDR_PRIM;
 
-  uint8_t chip_id = 0;
+  dev->intf_ptr = &dev_addr;
+  dev->intf = BME280_I2C_INTF;
+  dev->read = user_i2c_read;
+  dev->write = user_i2c_write;
+  dev->delay_ms = user_delay_ms;
 
-  while (retry_count > 0) {
-    chip_id = bme_read8(BME_REG_CHIP_ID);
+  rslt = bme280_init(&dev);
 
-    char* msg;
-    if (chip_id != BME_CHIP_ID) {
-      sprintf(msg, "Bad chip id %x\r\n", chip_id);
-      debug_print(msg);
-    } else {
-      debug_print("Good chip id\r\n");
-      break;
-    }
-
-    HAL_Delay(200);
-    retry_count--;
-  }
-
-  /*
-  uint8_t status = bme_read8(BME_REG_STATUS);
-  char* msg;
-  sprintf(msg, "Status: 0b%b", status);
-  */
-
-  return;
+  return rstl;
 }
 
 /* USER CODE END 0 */
@@ -202,7 +156,12 @@ int main(void) {
   char start_message[16] = "starting\r\n";
   debug_print(start_message);
 
-  bme_init();
+  struct bme280_dev bme280_dev;
+  int8_t rslt = bme_init(&bme280_dev);
+  if (rslt != BME280_OK) {
+    debug_print("BME Failed to init\r\n");
+    return;
+  }
 
 
   /* USER CODE END 2 */
@@ -210,8 +169,7 @@ int main(void) {
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1) {
-    /* USER CODE END WHILE */
-
+    /*
     uint8_t buf[12];
     float temp = bme_read_temperature();
     u_int32_t temp_mC = (uint32_t) (temp * 1000);
@@ -220,6 +178,11 @@ int main(void) {
     HAL_UART_Transmit(&huart2, buf, strlen((char*)buf), HAL_MAX_DELAY);
 
     HAL_Delay(500);
+    */
+
+    bme_read();
+
+    /* USER CODE END WHILE */
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
